@@ -1,0 +1,16 @@
+[package]
+name = "supafast"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "2.0.17"
+diesel = { version ="2.3.3", features = ["postgres", "r2d2"] }
+crossbeam-channel = "0.5.15"
+serde = { version = "1.0.228", features = ["derive"] }
+parking_lot = "0.12.5"
+
+[profile.release]
+lto=true
+codegen-units = 1
+opt-level = 3
