@@ -1,7 +1,9 @@
 use crossbeam_channel::{Receiver, Sender};
 use diesel::prelude::*;
 use std::thread;
+use std::time::Instant;
 
+use crate::benchmark::BenchmarkCollector;
 use crate::error::WorkerError;
 use crate::metrics::MetricsCollector;
 use crate::models::{ResponseStatus, WorkRequest, WorkResponse};
@@ -99,6 +101,7 @@ impl Worker {
 pub struct WorkerWithMetrics {
     worker: Worker,
     metrics: MetricsCollector,
+    benchmark: Option<BenchmarkCollector>,
 }
 
 impl WorkerWithMetrics {
@@ -107,10 +110,12 @@ impl WorkerWithMetrics {
         db_pool: DbPool,
         queue: Receiver<(WorkRequest, Sender<WorkResponse>)>,
         metrics: MetricsCollector,
+        benchmark: Option<BenchmarkCollector>,
     ) -> Self {
         Self {
             worker: Worker::new(worker_id, db_pool, queue),
             metrics,
+            benchmark,
         }
     }
 
@@ -118,13 +123,20 @@ impl WorkerWithMetrics {
         println!("Worker {} started", self.worker.worker_id);
 
         while let Ok((request, response_tx)) = self.worker.work_queue.recv() {
+            let start = Instant::now();
             let result = self.worker.process_request(&request);
+            let latency = start.elapsed();
 
             // Track metrics
             if result.success {
                 self.metrics.record_success();
             } else {
                 self.metrics.record_failure();
+            }
+
+            // Track benchmark if enabled
+            if let Some(ref benchmark) = self.benchmark {
+                benchmark.record_request(latency, result.success);
             }
 
             let _ = response_tx.send(result);
@@ -160,17 +172,20 @@ pub fn spawn_worker_pool_with_metrics(
     db_pool: DbPool,
     receiver: Receiver<(WorkRequest, Sender<WorkResponse>)>,
     metrics: MetricsCollector,
+    benchmark: Option<BenchmarkCollector>,
 ) -> Vec<thread::JoinHandle<()>> {
     (0..worker_count)
         .map(|worker_id| {
             let rx = receiver.clone();
             let pool = db_pool.clone();
             let metrics_clone = metrics.clone_handle();
+            let benchmark_clone = benchmark.as_ref().map(|b| b.clone_handle());
 
             thread::Builder::new()
                 .name(format!("worker-{}", worker_id))
                 .spawn(move || {
-                    let mut worker = WorkerWithMetrics::new(worker_id, pool, rx, metrics_clone);
+                    let mut worker =
+                        WorkerWithMetrics::new(worker_id, pool, rx, metrics_clone, benchmark_clone);
                     worker.run();
                 })
                 .expect("Failed to spawn worker thread")
